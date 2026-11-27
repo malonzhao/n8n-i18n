@@ -20,7 +20,7 @@ defaults:
     shell: bash
 
 env:
-  IMAGE_NAME: ghcr.io/malonzhao/n8n
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
   TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
