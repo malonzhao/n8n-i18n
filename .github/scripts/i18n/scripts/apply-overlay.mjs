@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createHash } from 'node:crypto';
 import {
 	copyFileSync,
 	existsSync,
@@ -15,15 +16,43 @@ import { parseArgs } from 'node:util';
 /** Default i18n directory, which is the parent of the scripts directory. */
 const DEFAULT_I18N_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** Import statement that activates the locale loader in the editor entry point. */
+/** Import statement that activates the locale loader at the end of the editor entry point. */
 export const LOADER_IMPORT = "import '@/app/i18nLocaleLoader';";
+
+/** Import statement that applies the boot locale at the start of the editor entry point. */
+export const BOOT_IMPORT = "import '@/app/i18nLocaleBoot';";
+
+/** Script tag of the editor entry point in the page template, before which the boot script goes. */
+export const ENTRY_SCRIPT_TAG = '<script type="module" src="/src/main.ts"></script>';
+
+/** End tag of the page head, before which the server embeds the settings script. */
+const HEAD_END_TAG = '</head>';
+
+/** Pattern of a script tag that loads the boot script, with or without a content hash. */
+const BOOT_SCRIPT_TAG_PATTERN =
+	/<script\b[^>]*\bsrc="[^"]*\/static\/i18n-overlay\/boot\.js(?:\?[^"]*)?"[^>]*><\/script>/g;
+
+/** Returns the script tag that loads the boot script with a content hash from the static files. */
+export function bootScriptTag(hash) {
+	return `<script src="/{{BASE_PATH}}/static/i18n-overlay/boot.js?v=${hash}" type="text/javascript"></script>`;
+}
+
+/** Pattern of the marker in the boot script template that the locale file table replaces. */
+const FILES_MARKER = /\/\*__I18N_OVERLAY_FILES__\*\/\s*\{\}/;
+
+/** Number of hexadecimal characters of the content hash in the locale file URLs. */
+const HASH_LENGTH = 12;
 
 /** Target paths in the n8n source tree, relative to the repository root. */
 const TARGETS = {
 	app: 'packages/frontend/editor-ui/src/app',
-	locales: 'packages/frontend/editor-ui/src/app/i18nLocales',
 	main: 'packages/frontend/editor-ui/src/main.ts',
+	indexHtml: 'packages/frontend/editor-ui/index.html',
+	static: 'packages/frontend/editor-ui/public/static/i18n-overlay',
 };
+
+/** Overlay source files that are copied into the app directory. */
+const APP_FILES = ['i18nLocaleBoot.ts', 'i18nLocaleLoader.ts'];
 
 /** Error for usage problems and missing paths. */
 export class OverlayError extends Error {}
@@ -93,12 +122,86 @@ export function removeUncompilable(messages, compile, prefix = []) {
 	return { kept, removed };
 }
 
-/** Returns the indentation that the first indented line of a JSON text uses. */
-function detectIndent(text) {
-	return /^[{[]\r?\n([ \t]+)/.exec(text)?.[1] ?? '\t';
+/** Returns the first hexadecimal characters of the SHA-256 hash of a text. */
+export function contentHash(text) {
+	return createHash('sha256').update(text).digest('hex').slice(0, HASH_LENGTH);
 }
 
-/** Copies the locale files and the loader into an n8n source tree and returns what it did. */
+/** Returns the static script that adds the messages of one locale to the overlay state. */
+export function renderLocaleScript(code, messages) {
+	return `window.__n8nI18nOverlay.messages[${JSON.stringify(code)}] = JSON.parse(${JSON.stringify(JSON.stringify(messages))});\n`;
+}
+
+/** Returns the boot script template with the marker replaced by the locale file table. */
+export function renderBootScript(template, files) {
+	if (!FILES_MARKER.test(template)) {
+		throw new OverlayError('The boot script template has no marker for the locale file table.');
+	}
+	return template.replace(FILES_MARKER, () => JSON.stringify(files));
+}
+
+/** Returns the entry point with the boot import as the first line, or null when the import is already present. */
+function addBootImport(main) {
+	if (main.split(/\r?\n/).some((line) => line.trim() === BOOT_IMPORT)) return null;
+	return `${BOOT_IMPORT}\n${main}`;
+}
+
+/** Returns the entry point with the loader import as the last line, or null when the import is already present. */
+function addLoaderImport(main) {
+	if (main.split(/\r?\n/).some((line) => line.trim() === LOADER_IMPORT)) return null;
+	const separator = main.length === 0 || main.endsWith('\n') ? '' : '\n';
+	return `${main}${separator}${LOADER_IMPORT}\n`;
+}
+
+/** Returns the page template with one boot script tag between the head end tag and the entry point tag, or null when the template already has it. */
+function setBootScriptTag(html, path, tag) {
+	const entryIndex = html.indexOf(ENTRY_SCRIPT_TAG);
+	if (entryIndex === -1) {
+		throw new OverlayError(`The page template ${path} has no tag ${ENTRY_SCRIPT_TAG}.`);
+	}
+	const headEndIndex = html.indexOf(HEAD_END_TAG);
+	if (headEndIndex === -1 || entryIndex < headEndIndex) {
+		throw new OverlayError(
+			`The page template ${path} does not have the tag ${ENTRY_SCRIPT_TAG} after the first ${HEAD_END_TAG}, so its structure changed.`,
+		);
+	}
+	const existing = [...html.matchAll(BOOT_SCRIPT_TAG_PATTERN)];
+	if (existing.length === 1) {
+		const [match] = existing;
+		if (match.index > headEndIndex && match.index < entryIndex) {
+			if (match[0] === tag) return null;
+			return `${html.slice(0, match.index)}${tag}${html.slice(match.index + match[0].length)}`;
+		}
+	}
+	const lines = html.split('\n').flatMap((line) => {
+		const rest = line.replace(BOOT_SCRIPT_TAG_PATTERN, '');
+		if (rest === line) return [line];
+		return rest.trim() === '' ? [] : [rest];
+	});
+	const index = lines.findIndex((line) => line.includes(ENTRY_SCRIPT_TAG));
+	const indent = /^[ \t]*/.exec(lines[index])[0];
+	lines.splice(index, 0, `${indent}${tag}`);
+	return lines.join('\n');
+}
+
+/** Reads one locale file and returns its messages, or null when it cannot be used. */
+function readLocaleMessages(sourcePath, log) {
+	if (!existsSync(sourcePath)) return null;
+	let parsed;
+	try {
+		parsed = JSON.parse(readFileSync(sourcePath, 'utf8'));
+	} catch (error) {
+		log(`::warning::Skipped ${sourcePath} because it is not valid JSON: ${error.message}`);
+		return null;
+	}
+	if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+		log(`::warning::Skipped ${sourcePath} because it is not a JSON object.`);
+		return null;
+	}
+	return parsed;
+}
+
+/** Writes the locale scripts, the boot script, and the editor modules into an n8n source tree and returns what it did. */
 export function applyOverlay({
 	repoRoot,
 	i18nDir = DEFAULT_I18N_DIR,
@@ -106,19 +209,21 @@ export function applyOverlay({
 	loadCompiler = loadMessageCompiler,
 }) {
 	const root = resolve(repoRoot);
-	const localesDir = join(root, TARGETS.locales);
 	const appDir = join(root, TARGETS.app);
 	const mainPath = join(root, TARGETS.main);
-	const loaderSource = join(i18nDir, 'overlay', 'i18nLocaleLoader.ts');
+	const indexHtmlPath = join(root, TARGETS.indexHtml);
+	const staticDir = join(root, TARGETS.static);
+	const overlayDir = join(i18nDir, 'overlay');
+	const bootTemplatePath = join(overlayDir, 'i18nBoot.js');
 
 	for (const [path, check] of [
 		[appDir, isDirectory],
 		[mainPath, existsSync],
-		[loaderSource, existsSync],
+		[bootTemplatePath, existsSync],
+		...APP_FILES.map((name) => [join(overlayDir, name), existsSync]),
 	]) {
 		if (!check(path)) throw new OverlayError(`The path ${path} does not exist.`);
 	}
-	mkdirSync(localesDir, { recursive: true });
 
 	let compile = null;
 	try {
@@ -129,30 +234,15 @@ export function applyOverlay({
 		);
 	}
 
-	const copied = [];
+	const scripts = [];
 	const removedByLocale = {};
 	const skipped = [];
 	for (const code of readLocaleCodes(join(i18nDir, 'config.json'))) {
-		const sourcePath = join(i18nDir, 'locales', `${code}.json`);
-		if (!existsSync(sourcePath)) {
+		const parsed = readLocaleMessages(join(i18nDir, 'locales', `${code}.json`), log);
+		if (parsed === null) {
 			skipped.push(code);
 			continue;
 		}
-		const text = readFileSync(sourcePath, 'utf8');
-		let parsed;
-		try {
-			parsed = JSON.parse(text);
-		} catch (error) {
-			log(`::warning::Skipped ${sourcePath} because it is not valid JSON: ${error.message}`);
-			skipped.push(code);
-			continue;
-		}
-		if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-			log(`::warning::Skipped ${sourcePath} because it is not a JSON object.`);
-			skipped.push(code);
-			continue;
-		}
-		const targetPath = join(localesDir, `${code}.json`);
 		const { kept, removed } = compile
 			? removeUncompilable(parsed, compile)
 			: { kept: parsed, removed: [] };
@@ -164,30 +254,58 @@ export function applyOverlay({
 			log(
 				`::warning::Removed ${removed.length} entries from ${code} because vue-i18n cannot compile them: ${listed}${removed.length > LISTED_REMOVED_KEYS ? '; …' : ''}`,
 			);
-			writeFileSync(targetPath, `${JSON.stringify(kept, null, detectIndent(text))}\n`);
-		} else {
-			writeFileSync(targetPath, text);
 		}
 		removedByLocale[code] = removed.map((item) => item.key);
-		copied.push(code);
+		scripts.push({ code, content: renderLocaleScript(code, kept) });
+	}
+	const copied = scripts.map((script) => script.code);
+	const files = Object.fromEntries(
+		scripts.map(({ code, content }) => [code, `${code}.js?v=${contentHash(content)}`]),
+	);
+
+	let html = null;
+	let bootHash = null;
+	if (scripts.length > 0) {
+		if (!existsSync(indexHtmlPath)) {
+			throw new OverlayError(`The path ${indexHtmlPath} does not exist.`);
+		}
+		const bootScript = renderBootScript(readFileSync(bootTemplatePath, 'utf8'), files);
+		bootHash = contentHash(bootScript);
+		html = setBootScriptTag(
+			readFileSync(indexHtmlPath, 'utf8'),
+			indexHtmlPath,
+			bootScriptTag(bootHash),
+		);
+		mkdirSync(staticDir, { recursive: true });
+		for (const { code, content } of scripts) {
+			writeFileSync(join(staticDir, `${code}.js`), content);
+		}
+		writeFileSync(join(staticDir, 'boot.js'), bootScript);
+		if (html !== null) writeFileSync(indexHtmlPath, html);
 	}
 
-	copyFileSync(loaderSource, join(appDir, 'i18nLocaleLoader.ts'));
-
-	const main = readFileSync(mainPath, 'utf8');
-	const hasImport = main.split(/\r?\n/).some((line) => line.trim() === LOADER_IMPORT);
-	if (!hasImport) {
-		const separator = main.length === 0 || main.endsWith('\n') ? '' : '\n';
-		writeFileSync(mainPath, `${main}${separator}${LOADER_IMPORT}\n`);
+	for (const name of APP_FILES) {
+		copyFileSync(join(overlayDir, name), join(appDir, name));
 	}
+
+	let main = readFileSync(mainPath, 'utf8');
+	const withBoot = addBootImport(main);
+	if (withBoot !== null) main = withBoot;
+	const withLoader = addLoaderImport(main);
+	if (withLoader !== null) main = withLoader;
+	if (withBoot !== null || withLoader !== null) writeFileSync(mainPath, main);
 
 	log(
-		`Copied locales: ${copied.length > 0 ? copied.join(', ') : 'none (no locale files found, so the UI stays in English)'}. Installed the locale loader${hasImport ? ' (the import was already present)' : ''}.`,
+		`Copied locales: ${copied.length > 0 ? copied.join(', ') : 'none (no locale files found, so the UI stays in English)'}. Installed the locale modules${withBoot === null && withLoader === null ? ' (the imports were already present)' : ''}${scripts.length > 0 ? `, the boot script ${bootHash}${html === null ? ' (the script tag was already up to date)' : ' (the script tag was updated)'}` : ''}.`,
 	);
 	return {
 		copied,
 		skipped,
-		importAdded: !hasImport,
+		importAdded: withLoader !== null,
+		bootImportAdded: withBoot !== null,
+		scriptTagAdded: html !== null,
+		bootHash,
+		files,
 		compileChecked: compile !== null,
 		removedByLocale,
 	};
