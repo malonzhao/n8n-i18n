@@ -163,9 +163,57 @@ jobs:
           fi
           echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
 
+  build-source:
+    name: Build translation source
+    needs: prepare
+    if: needs.prepare.outputs.pending == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout i18n directory
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          fetch-depth: 1
+          sparse-checkout: .github/scripts/i18n
+          persist-credentials: false
+
+      - name: Checkout English messages of the upstream tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+          path: .upstream
+          fetch-depth: 1
+          sparse-checkout: |
+            packages/frontend/@n8n/i18n/src/locales
+            packages/frontend/@n8n/design-system/src/locale/lang
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+
+      - name: Build translation source
+        run: |
+          node .github/scripts/i18n/scripts/build-source.mjs \
+            --messages .upstream/packages/frontend/@n8n/i18n/src/locales/en.json \
+            --design-system .upstream/packages/frontend/@n8n/design-system/src/locale/lang/en.ts \
+            --output "${RUNNER_TEMP}/translation-source/en.json"
+
+      - name: Upload translation source
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: translation-source
+          path: ${{ runner.temp }}/translation-source/en.json
+          if-no-files-found: error
+          retention-days: 7
+
   translate:
     name: Translate (${{ matrix.locale }})
-    needs: prepare
+    needs: [prepare, build-source]
     if: needs.prepare.outputs.pending == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 350
@@ -184,15 +232,11 @@ jobs:
           sparse-checkout: .github/scripts/i18n
           persist-credentials: false
 
-      - name: Checkout English messages of the upstream tag
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download translation source
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          repository: ${{ env.UPSTREAM_REPO }}
-          ref: refs/tags/${{ needs.prepare.outputs.tag }}
-          path: .upstream
-          fetch-depth: 1
-          sparse-checkout: packages/frontend/@n8n/i18n/src/locales
-          persist-credentials: false
+          name: translation-source
+          path: ${{ runner.temp }}/translation-source
 
       - name: Save base files
         env:
@@ -216,7 +260,7 @@ jobs:
           I18N_CONCURRENCY: ${{ secrets.I18N_CONCURRENCY }}
         run: |
           node .github/scripts/i18n/scripts/translate.mjs \
-            --source .upstream/packages/frontend/@n8n/i18n/src/locales/en.json \
+            --source "${RUNNER_TEMP}/translation-source/en.json" \
             --locale "$LOCALE"
 
       - name: Stage translation files
@@ -244,8 +288,8 @@ jobs:
 
   commit:
     name: Commit translations
-    needs: [prepare, translate]
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.pending == 'true' }}
+    needs: [prepare, build-source, translate]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.pending == 'true' && needs.build-source.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -259,15 +303,11 @@ jobs:
           fetch-depth: 1
           sparse-checkout: .github/scripts/i18n
 
-      - name: Checkout English messages of the upstream tag
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download translation source
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          repository: ${{ env.UPSTREAM_REPO }}
-          ref: refs/tags/${{ needs.prepare.outputs.tag }}
-          path: .upstream
-          fetch-depth: 1
-          sparse-checkout: packages/frontend/@n8n/i18n/src/locales
-          persist-credentials: false
+          name: translation-source
+          path: ${{ runner.temp }}/translation-source
 
       - name: Download translation files
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -281,7 +321,7 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           results="${RUNNER_TEMP}/i18n-results"
-          source=".upstream/packages/frontend/@n8n/i18n/src/locales/en.json"
+          source="${RUNNER_TEMP}/translation-source/en.json"
           if [ ! -d "$results" ]; then
             echo "No translation results for ${TAG}." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
