@@ -49,7 +49,8 @@ const HTML_TAG_SOURCE = String.raw`<\/?[A-Za-z][^<>]*>`;
 const LINE_BREAK_TAG_PATTERN = /^<br\s*\/?>$/i;
 
 /** Pattern of an HTML attribute whose value is text for the user, with the value in quotation marks. */
-const TEXT_ATTRIBUTE_PATTERN = /(\s(?:title|alt|aria-label|placeholder)\s*=\s*)(?:"[^"]*"|'[^']*')/gi;
+const TEXT_ATTRIBUTE_PATTERN =
+	/(\s(?:title|alt|aria-label|placeholder)\s*=\s*)(?:"[^"]*"|'[^']*')/gi;
 
 /** Kinds of message tokens, in the order of the groups in the token pattern. */
 const TOKEN_KINDS = ['links', 'literals', 'placeholders', 'tags'];
@@ -64,6 +65,20 @@ const TOKEN_PATTERN = new RegExp(
 
 /** Characters with special meaning in vue-i18n messages that a translation must not add. */
 const SPECIAL_CHARACTERS = ['@', '{', '}', '|'];
+
+/** Unicode script names for each ISO 15924 code that stands for a combination of scripts. */
+const COMBINED_SCRIPTS = {
+	Hans: ['Han'],
+	Hant: ['Han'],
+	Jpan: ['Han', 'Hiragana', 'Katakana'],
+	Kore: ['Hangul', 'Han'],
+};
+
+/** Pattern of a word with at least three Latin letters. */
+const LATIN_WORD_PATTERN = /\p{Script=Latin}{3,}/gu;
+
+/** Patterns of one character in the script of each locale code, or null when the check does not apply. */
+const targetScriptPatterns = new Map();
 
 /** API formats: OpenAI chat completions, or Anthropic Messages. */
 const API_FORMATS = ['openai', 'anthropic'];
@@ -141,9 +156,22 @@ export function pruneRemoved(entries, translations, state) {
 }
 
 /** Returns "keep" for a valid up-to-date translation, "adopt" for a valid translation without a state record, or "translate". */
-export function classifyEntry(entry, translations, state, optionalPlaceholders = []) {
+export function classifyEntry(
+	entry,
+	translations,
+	state,
+	optionalPlaceholders = [],
+	localeCode = null,
+) {
 	if (!translations.has(entry.id)) return 'translate';
-	if (validateTranslation(entry.value, translations.get(entry.id), optionalPlaceholders) !== null) {
+	if (
+		validateTranslation(
+			entry.value,
+			translations.get(entry.id),
+			optionalPlaceholders,
+			localeCode,
+		) !== null
+	) {
 		return 'translate';
 	}
 	const recorded = state.get(entry.id);
@@ -152,7 +180,13 @@ export function classifyEntry(entry, translations, state, optionalPlaceholders =
 }
 
 /** Splits the source entries into kept translations and entries that need translation. */
-export function planTranslation(entries, translations, state, optionalPlaceholders = []) {
+export function planTranslation(
+	entries,
+	translations,
+	state,
+	optionalPlaceholders = [],
+	localeCode = null,
+) {
 	const pruned = pruneRemoved(entries, translations, state);
 	const pending = [];
 	let adopted = 0;
@@ -162,6 +196,7 @@ export function planTranslation(entries, translations, state, optionalPlaceholde
 			pruned.translations,
 			pruned.state,
 			optionalPlaceholders,
+			localeCode,
 		);
 		if (decision === 'adopt') {
 			pruned.state.set(entry.id, hashSource(entry.value));
@@ -272,8 +307,49 @@ function tokenMismatch(expected, actual, optionalPlaceholders) {
 	return null;
 }
 
+/** Returns a pattern of one character in the script of a locale, or null when the locale uses the Latin script or has no known script. */
+function buildTargetScriptPattern(localeCode) {
+	try {
+		const script = new Intl.Locale(localeCode).maximize().script;
+		if (script === undefined || script === 'Latn') return null;
+		const names = COMBINED_SCRIPTS[script] ?? [script];
+		return new RegExp(names.map((name) => `\\p{Script=${name}}`).join('|'), 'u');
+	} catch {
+		return null;
+	}
+}
+
+/** Returns the cached pattern of one character in the script of a locale, or null when the check does not apply. */
+function targetScriptPattern(localeCode) {
+	if (!targetScriptPatterns.has(localeCode)) {
+		targetScriptPatterns.set(localeCode, buildTargetScriptPattern(localeCode));
+	}
+	return targetScriptPatterns.get(localeCode);
+}
+
+/** Returns the lowercase Latin words of a message outside its tokens. */
+function latinWords(message) {
+	return tokenize(message).bare.toLowerCase().match(LATIN_WORD_PATTERN) ?? [];
+}
+
+/** Returns true when a translation has no character in the script of the locale and has a Latin word that no source word starts with or is the start of. */
+function isInOtherLanguage(source, translation, localeCode) {
+	if (localeCode === null || localeCode === undefined) return false;
+	const pattern = targetScriptPattern(localeCode);
+	if (pattern === null || pattern.test(translation)) return false;
+	const sourceWords = latinWords(source);
+	return latinWords(translation).some((word) =>
+		sourceWords.every((other) => !other.startsWith(word) && !word.startsWith(other)),
+	);
+}
+
 /** Returns the reason why a translation is not valid for its source, or null when it is valid, where one form with the tokens of the last plural form can replace all plural forms. */
-export function validateTranslation(source, translation, optionalPlaceholders = []) {
+export function validateTranslation(
+	source,
+	translation,
+	optionalPlaceholders = [],
+	localeCode = null,
+) {
 	if (typeof translation !== 'string') return 'translation is not a string';
 	if (source.trim() !== '' && translation.trim() === '') return 'translation is empty';
 
@@ -301,6 +377,9 @@ export function validateTranslation(source, translation, optionalPlaceholders = 
 		if (!expected.bare.includes(character) && actual.bare.includes(character)) {
 			return `translation adds a bare "${character}"`;
 		}
+	}
+	if (isInOtherLanguage(source, translation, localeCode)) {
+		return 'translation is not in the target language: it has no text in the script of the target language and adds words that the source does not have';
 	}
 	return null;
 }
@@ -374,7 +453,7 @@ export function buildPrompt(batch, locale, previous = null) {
 		'Keep placeholders in curly braces, such as {count} or {name}, exactly as they are.',
 		'Keep linked messages that start with "@:", such as @:_reusableBaseText.cancel, exactly as they are.',
 		'Keep HTML tags and their attributes exactly as they are. Translate only the text between the tags and the text of title, alt, and aria-label attributes.',
-		'Text in {\'...\'} is literal text. Keep the {\'...\'} wrapper and the special characters in it. You can translate the words in it.',
+		"Text in {'...'} is literal text. Keep the {'...'} wrapper and the special characters in it. You can translate the words in it.",
 		'The " | " separator divides plural forms. Return exactly the same number of forms as the English text, also when the target language has more plural forms.',
 		'With two forms, the application shows the first form for the number 1 and the second form for all other numbers. With three forms, it shows the first form for 0, the second form for 1, and the third form for all other numbers.',
 		'Do not add the characters @, {, }, or | if the English text does not contain them.',
@@ -533,7 +612,7 @@ export async function translateLocale({
 }) {
 	const entries = flattenMessages(sourceMessages);
 	const optionalPlaceholders = settings.optionalPlaceholders ?? [];
-	const plan = planTranslation(entries, translations, state, optionalPlaceholders);
+	const plan = planTranslation(entries, translations, state, optionalPlaceholders, locale.code);
 	const stats = {
 		total: entries.length,
 		pending: plan.pending.length,
@@ -592,7 +671,7 @@ export async function translateLocale({
 						stats.failed++;
 						continue;
 					}
-					const reason = validateTranslation(entry.value, value, optionalPlaceholders);
+					const reason = validateTranslation(entry.value, value, optionalPlaceholders, locale.code);
 					if (reason) onRejected({ entry, value, reason });
 					else accept(entry, value);
 				}

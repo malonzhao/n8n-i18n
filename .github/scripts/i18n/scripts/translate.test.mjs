@@ -49,6 +49,13 @@ const SETTINGS = {
 	requestTimeoutMs: 1000,
 };
 
+/** Reason for a translation that is not in the language of the target locale. */
+const OTHER_LANGUAGE =
+	'translation is not in the target language: it has no text in the script of the target language and adds words that the source does not have';
+
+/** Locale definition with a script that is not Latin, used by the tests. */
+const ARABIC = { code: 'ar', name: 'Arabic', nativeName: 'العربية', glossary: {} };
+
 /** API configuration used by the tests. */
 const API = { baseUrl: 'https://llm.example.test/v1/', model: 'test-model', apiKey: 'secret' };
 
@@ -186,6 +193,30 @@ describe('incremental planning', () => {
 		assert.equal(planTranslation([entry], translations, state, ['suffix']).pending.length, 0);
 	});
 
+	it('translates a stored translation in a different language again only with a locale code', () => {
+		const [entry, other] = flattenMessages({ creds: 'Credentials', title: 'Workflows' });
+		const translations = new Map([
+			[entry.id, 'Credenciales'],
+			[other.id, 'سير العمل'],
+		]);
+		const state = new Map([
+			[entry.id, hashSource(entry.value)],
+			[other.id, hashSource(other.value)],
+		]);
+		assert.equal(classifyEntry(entry, translations, state), 'keep');
+		assert.equal(classifyEntry(entry, translations, state, [], 'ar'), 'translate');
+		assert.equal(classifyEntry(other, translations, state, [], 'ar'), 'keep');
+		assert.equal(classifyEntry(entry, translations, new Map(), [], 'ar'), 'translate');
+		assert.equal(planTranslation([entry, other], translations, state).pending.length, 0);
+		const plan = planTranslation([entry, other], translations, state, [], 'ar');
+		assert.deepEqual(
+			plan.pending.map((item) => item.key),
+			['creds'],
+		);
+		assert.equal(plan.translations.has(entry.id), false);
+		assert.equal(plan.translations.get(other.id), 'سير العمل');
+	});
+
 	it('keeps manual edits, drops stale entries, and removes keys that upstream deleted', () => {
 		const translations = new Map([
 			[title.id, 'Manually edited'],
@@ -221,7 +252,7 @@ describe('incremental planning', () => {
 	it('splits plural forms only at separators outside tokens', () => {
 		assert.deepEqual(splitPluralForms('No items'), ['No items']);
 		assert.deepEqual(splitPluralForms('1 item | {n} items'), ['1 item ', ' {n} items']);
-		assert.deepEqual(splitPluralForms("a {'|'} b | <i title=\"x|y\">c</i>"), [
+		assert.deepEqual(splitPluralForms('a {\'|\'} b | <i title="x|y">c</i>'), [
 			"a {'|'} b ",
 			' <i title="x|y">c</i>',
 		]);
@@ -281,7 +312,12 @@ describe('validateTranslation', () => {
 			'{count} 项 | 项',
 			'placeholders differ',
 		],
-		['rejects a placeholder that the source does not have', 'Hi {a}', 'Hi {a} {b}', 'placeholders differ'],
+		[
+			'rejects a placeholder that the source does not have',
+			'Hi {a}',
+			'Hi {a} {b}',
+			'placeholders differ',
+		],
 		[
 			'accepts translated attribute text',
 			'Please <a href="{url}" target="_blank" title="How to install npm">install npm</a>.',
@@ -328,11 +364,21 @@ describe('validateTranslation', () => {
 		['accepts no line break tags', 'a<br />b', '甲乙', null],
 		['accepts a line break tag in another notation', 'a<br />b', '甲<br>乙', null],
 		['rejects more line break tags', 'a<br />b', '甲<br />乙<br />丙', 'HTML tags differ'],
-		['rejects a line break tag that the source does not have', 'a b', '甲<br />乙', 'HTML tags differ'],
+		[
+			'rejects a line break tag that the source does not have',
+			'a b',
+			'甲<br />乙',
+			'HTML tags differ',
+		],
 		['accepts reordered placeholders', '{a} of {b}', '{b} von {a}', null],
 		['rejects changed linked messages', 'See @:a.b', 'Siehe @:a.c', 'linked messages differ'],
 		['rejects missing linked messages', '@:a.b', 'Abbrechen', 'linked messages differ'],
-		['accepts one form with the tokens of the last plural form', '1 item | {n} items', '{n} 项', null],
+		[
+			'accepts one form with the tokens of the last plural form',
+			'1 item | {n} items',
+			'{n} 项',
+			null,
+		],
 		[
 			'accepts one form for plural forms with the same tokens',
 			', {count} sub-execution | , {count} sub-executions',
@@ -345,7 +391,12 @@ describe('validateTranslation', () => {
 			'1 项',
 			'the translation has one plural form, and its tokens differ from the last plural form of the source',
 		],
-		['rejects a lost plural segment', 'no | one | {n}', 'ein | {n}', 'plural segment count differs'],
+		[
+			'rejects a lost plural segment',
+			'no | one | {n}',
+			'ein | {n}',
+			'plural segment count differs',
+		],
 		['accepts kept plural segments', 'no | one | {n}', 'kein | ein | {n}', null],
 		[
 			'rejects changed HTML tags',
@@ -416,6 +467,88 @@ describe('validateTranslation', () => {
 		assert.equal(validateTranslation(source, '个版本', ['suffix']), 'placeholders differ');
 		assert.equal(validateTranslation(source, '{n} 个版本 {x}', ['suffix']), 'placeholders differ');
 	});
+});
+
+describe('validateTranslation with a locale code', () => {
+	const cases = [
+		['accepts a translation equal to the source', 'ar', 'Webhook', 'Webhook', null],
+		['accepts a product name equal to the source', 'th', 'OpenAI', 'OpenAI', null],
+		['accepts a phrase equal to the source', 'ru', 'delete all data', 'delete all data', null],
+		[
+			'accepts a kept literal equal to the source',
+			'ja',
+			"git{'@'}github.com:user/repository.git",
+			"git{'@'}github.com:user/repository.git",
+			null,
+		],
+		['accepts changed punctuation', 'zh-CN', 'Trace ID: {traceId}', 'Trace ID：{traceId}', null],
+		['accepts a changed letter case', 'ko', 'Html', 'HTML', null],
+		['accepts a singular form of a source word', 'zh-TW', 'Workers', 'Worker', null],
+		[
+			'accepts a singular form next to a placeholder',
+			'ar',
+			'{count} workflows',
+			'{count} workflow',
+			null,
+		],
+		['accepts a singular form of a hyphenated word', 'ja', 'Sub-agents', 'Sub-agent', null],
+		['accepts reordered source words', 'ru', 'MCP URL', 'URL MCP', null],
+		[
+			'accepts Latin words together with text in the target script',
+			'zh-CN',
+			'Type "delete all data" to confirm',
+			'输入"delete all data"以确认',
+			null,
+		],
+		['accepts a Latin word together with Han text', 'zh-TW', 'Worker pool', 'Worker 池', null],
+		[
+			'rejects a translation in a different language',
+			'ar',
+			'Instance admins',
+			'Administradores de la instancia',
+			OTHER_LANGUAGE,
+		],
+		[
+			'rejects a translation in a different language with a placeholder',
+			'ar',
+			'Node {name}',
+			'Nodo {name}',
+			OTHER_LANGUAGE,
+		],
+		[
+			'rejects plural forms in a different language',
+			'ar',
+			'{count} node | {count} nodes',
+			'{count} nodo | {count} nodos',
+			OTHER_LANGUAGE,
+		],
+		[
+			'rejects one word in a different language',
+			'ar',
+			'Credentials',
+			'Credenciales',
+			OTHER_LANGUAGE,
+		],
+		[
+			'rejects Latin text for a Cyrillic locale',
+			'ru',
+			'Credentials',
+			'Credenciales',
+			OTHER_LANGUAGE,
+		],
+		['accepts Arabic text', 'ar', 'Credentials', 'بيانات الاعتماد', null],
+		['does not check without a locale code', null, 'Credentials', 'Credenciales', null],
+		['does not check an undefined locale code', undefined, 'Credentials', 'Credenciales', null],
+		['does not check a Latin locale', 'es', 'Credentials', 'Credenciales', null],
+		['does not check another Latin locale', 'vi', 'Node {name}', 'Nút {name}', null],
+		['does not check a locale code that is not valid', '!!', 'Credentials', 'Credenciales', null],
+		['does not check a locale without a known script', 'xx', 'Credentials', 'Credenciales', null],
+		['checks other problems first', 'ar', 'Node {name}', '', 'translation is empty'],
+	];
+	for (const [name, localeCode, source, translation, expected] of cases) {
+		it(name, () =>
+			assert.equal(validateTranslation(source, translation, [], localeCode), expected));
+	}
 });
 
 describe('parseModelOutput', () => {
@@ -828,7 +961,10 @@ describe('translateLocale', () => {
 			api: API,
 			deps,
 		});
-		assert.equal(result.translations.get(JSON.stringify(['app.count'])), 'DE 1 item | {count} items');
+		assert.equal(
+			result.translations.get(JSON.stringify(['app.count'])),
+			'DE 1 item | {count} items',
+		);
 		assert.equal(result.stats.corrected, 1);
 		assert.equal(result.stats.rejected, 0);
 		assert.equal(result.stats.translated, 6);
@@ -843,6 +979,56 @@ describe('translateLocale', () => {
 		assert.match(corrections[0], /"translation": "Elemente"/);
 		assert.match(corrections[0], /"problem": "the translation has one plural form/);
 		assert.doesNotMatch(corrections[0], /app\.title/);
+	});
+
+	it('asks the model one time to correct a translation in a different language', async () => {
+		const calls = [];
+		const { deps, logs } = testDeps({
+			fetch: translatingFetch(
+				(value, key, correction) => (correction ? 'العقدة {name}' : 'Nodo {name}'),
+				calls,
+			),
+		});
+		const result = await translateLocale({
+			sourceMessages: { node: 'Node {name}' },
+			translations: new Map(),
+			state: new Map(),
+			locale: ARABIC,
+			settings: SETTINGS,
+			api: API,
+			deps,
+		});
+		assert.equal(result.translations.get(JSON.stringify(['node'])), 'العقدة {name}');
+		assert.equal(result.stats.corrected, 1);
+		assert.equal(result.stats.rejected, 0);
+		assert.deepEqual(
+			logs.filter((line) => line.startsWith('Rejected ')),
+			[],
+		);
+		const corrections = calls
+			.map((call) => JSON.parse(call.init.body).messages[1].content)
+			.filter((content) => content.includes('An automatic check rejected'));
+		assert.equal(corrections.length, 1);
+		assert.match(corrections[0], /"translation": "Nodo \{name\}"/);
+		assert.ok(corrections[0].includes(`"problem": "${OTHER_LANGUAGE}"`));
+	});
+
+	it('translates a stored translation in a different language again', async () => {
+		const calls = [];
+		const { deps } = testDeps({ fetch: translatingFetch(() => 'بيانات الاعتماد', calls) });
+		const id = JSON.stringify(['creds']);
+		const result = await translateLocale({
+			sourceMessages: { creds: 'Credentials' },
+			translations: new Map([[id, 'Credenciales']]),
+			state: new Map([[id, hashSource('Credentials')]]),
+			locale: ARABIC,
+			settings: SETTINGS,
+			api: API,
+			deps,
+		});
+		assert.equal(calls.length, 1);
+		assert.equal(result.stats.pending, 1);
+		assert.equal(result.translations.get(id), 'بيانات الاعتماد');
 	});
 
 	it('does not ask for a correction after a fatal API error', async () => {
