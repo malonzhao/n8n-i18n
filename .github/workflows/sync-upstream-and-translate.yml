@@ -28,6 +28,72 @@ env:
   UPSTREAM_URL: https://github.com/n8n-io/n8n.git
 
 jobs:
+  sync-master:
+    name: Sync master with upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+
+    steps:
+      - name: Merge upstream master
+        id: merge
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_UPSTREAM_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Set the SYNC_UPSTREAM_TOKEN secret. The token needs write access to Contents and Workflows to merge the upstream master branch."
+            exit 1
+          fi
+
+          if ! response=$(gh api --method POST "repos/${GITHUB_REPOSITORY}/merge-upstream" -f branch=master); then
+            echo "::error::Could not merge the upstream master branch into master. Resolve the merge conflicts or check the token permissions. Response: ${response}"
+            exit 1
+          fi
+
+          merge_type=$(jq -r .merge_type <<< "$response")
+          base_branch=$(jq -r .base_branch <<< "$response")
+          if [ "$merge_type" = 'none' ]; then
+            echo "master already contains ${base_branch}. Nothing to do."
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Synced master with ${base_branch} (${merge_type})." | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Disable upstream workflows and cancel their runs
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGED: ${{ steps.merge.outputs.merged }}
+          FORK_WORKFLOWS: .github/workflows/build-container-image.yml .github/workflows/sync-upstream-and-translate.yml
+        run: |
+          if [ "$MERGED" = 'true' ]; then
+            sleep 30
+          fi
+
+          upstream=$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/actions/workflows?per_page=100" |
+            jq -c --arg keep "$FORK_WORKFLOWS" '[.[].workflows[] | select((.path | startswith(".github/workflows/")) and (.path | IN($keep | split(" ")[]) | not))]')
+
+          jq -r '.[] | select(.state == "active") | "\(.id)\t\(.path)"' <<< "$upstream" |
+            while IFS=$'\t' read -r id path; do
+              gh api --method PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/${id}/disable"
+              echo "Disabled ${path}." | tee -a "$GITHUB_STEP_SUMMARY"
+            done
+
+          ids=$(jq -c '[.[].id]' <<< "$upstream")
+          for run_status in requested pending waiting queued in_progress; do
+            gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/actions/runs?status=${run_status}&per_page=100" |
+              jq -r --argjson ids "$ids" '.[].workflow_runs[] | select(.workflow_id | IN($ids[])) | "\(.id)\t\(.path)"'
+          done | sort -u |
+            while IFS=$'\t' read -r run_id path; do
+              if gh api --method POST "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/cancel" > /dev/null; then
+                echo "Cancelled run ${run_id} of ${path}." | tee -a "$GITHUB_STEP_SUMMARY"
+              else
+                echo "::warning::Could not cancel run ${run_id} of ${path}."
+              fi
+            done
+
   prepare:
     name: Resolve release tag and locales
     runs-on: ubuntu-latest
