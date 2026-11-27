@@ -1,5 +1,5 @@
-name: 'Util: Sync Upstream Release Tag'
-run-name: "Util: Sync Upstream Release Tag (${{ inputs.tag || 'latest release' }})"
+name: 'Util: Sync Upstream and Translate UI'
+run-name: "Util: Sync Upstream and Translate UI (${{ inputs.tag || 'latest release' }})"
 
 on:
   schedule:
@@ -66,7 +66,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MERGED: ${{ steps.merge.outputs.merged }}
-          FORK_WORKFLOWS: .github/workflows/build-container-image.yml .github/workflows/sync-upstream-and-translate.yml
+          FORK_WORKFLOWS: .github/workflows/build-container-image.yml .github/workflows/util-sync-upstream-and-translate-ui.yml
         run: |
           if [ "$MERGED" = 'true' ]; then
             sleep 30
