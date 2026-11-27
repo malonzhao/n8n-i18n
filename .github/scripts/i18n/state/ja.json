@@ -3123,6 +3123,7 @@
 	"nodeView.showError.openExecution.node": "b88ce0ef72793eca",
 	"nodeView.showError.openWorkflow.title": "d8e972215ae64b3a",
 	"nodeView.showError.stopExecution.title": "6bd35de7a380c058",
+	"nodeView.showError.stopWaitingForWebhook.title": "ea4a4d8fc99e0348",
 	"nodeView.showError.nodeNodeCompatible.title": "f319eb274055e3e9",
 	"nodeView.showError.nodeNodeCompatible.message": "5444fe2ee344e224",
 	"nodeView.showMessage.addNodeButton.message": "b6c4dc51d2533bd6",

@@ -3123,6 +3123,7 @@
 	"nodeView.showError.openExecution.node": "実行中のノードを開く際に問題が発生しました",
 	"nodeView.showError.openWorkflow.title": "ワークフローを開く際に問題が発生しました",
 	"nodeView.showError.stopExecution.title": "実行の停止に問題があります",
+	"nodeView.showError.stopWaitingForWebhook.title": "テスト用Webhookの削除に問題が発生しました",
 	"nodeView.showError.nodeNodeCompatible.title": "接続できません",
 	"nodeView.showError.nodeNodeCompatible.message": "ノード「{sourceNodeName}」はノード「{targetNodeName}」と互換性がないため、接続できません。",
 	"nodeView.showMessage.addNodeButton.message": "「{nodeTypeName}」は不明なノードタイプです",
