@@ -1,4 +1,4 @@
-import { ASSISTANT_SKILLS_FLAG, SKILL_SYNC_FLAG } from '@n8n/api-types';
+import { ASSISTANT_SKILLS_FLAG, SKILL_SYNC_FLAG, WORKFLOWS_IN_SKILLS_FLAG } from '@n8n/api-types';
 import type { ModuleRegistry } from '@n8n/backend-common';
 import type { PostHogClient } from '@n8n/backend-services';
 import type { ModuleSettings } from '@n8n/decorators';
@@ -9,7 +9,9 @@ import { mock } from 'vitest-mock-extended';
 import { AssistantSkillsFlagGate } from '../services/assistant-skills-flag-gate';
 import type { SkillUsage } from '../services/skill-usage.contracts';
 import { SkillSyncFlagGate } from '../services/skill-sync-flag-gate';
+import type { SkillSyncSettingsService } from '../services/skill-sync-settings.service';
 import { SkillUsageProxy } from '../services/skill-usage-proxy.service';
+import { WorkflowsInSkillsFlagGate } from '../services/workflows-in-skills-flag-gate';
 import { SkillsGate } from '../services/skills-gate';
 
 describe('skills gates', () => {
@@ -27,8 +29,11 @@ describe('skills gates', () => {
 		const skillsGate = new SkillsGate(proxy, moduleRegistry);
 		const postHog = mock<PostHogClient>();
 		const assistantGate = new AssistantSkillsFlagGate(skillsGate, postHog);
-		const syncGate = new SkillSyncFlagGate(skillsGate, postHog);
-		return { proxy, skillsGate, postHog, assistantGate, syncGate };
+		const skillSyncSettings = mock<SkillSyncSettingsService>();
+		skillSyncSettings.isEnabled.mockReturnValue(true);
+		const syncGate = new SkillSyncFlagGate(skillsGate, postHog, skillSyncSettings);
+		const mentionsGate = new WorkflowsInSkillsFlagGate(skillsGate, postHog);
+		return { proxy, skillsGate, postHog, assistantGate, syncGate, skillSyncSettings, mentionsGate };
 	}
 
 	const user = mock<User>({ id: 'user-1' });
@@ -101,6 +106,32 @@ describe('skills gates', () => {
 		},
 	);
 
+	it('keeps workflow mentions off while skills are off, whatever the flag says', async () => {
+		const { postHog, mentionsGate } = createGates();
+		postHog.getFeatureFlagForInstance.mockResolvedValue('variant');
+
+		expect(await mentionsGate.isEnabled()).toBe(false);
+		expect(postHog.getFeatureFlagForInstance).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		{ flag: 'variant', expected: true },
+		{ flag: 'control', expected: false },
+		{ flag: true, expected: false },
+		{ flag: false, expected: false },
+		{ flag: undefined, expected: false },
+	])(
+		'turns workflow mentions on only for the flag value variant (flag: $flag)',
+		async ({ flag, expected }) => {
+			const { proxy, postHog, mentionsGate } = createGates();
+			postHog.getFeatureFlagForInstance.mockResolvedValue(flag);
+			proxy.register(mock<SkillUsage>());
+
+			expect(await mentionsGate.isEnabled()).toBe(expected);
+			expect(postHog.getFeatureFlagForInstance).toHaveBeenCalledWith(WORKFLOWS_IN_SKILLS_FLAG);
+		},
+	);
+
 	it('keeps Skill Sync off while skills are off, whatever the flag says', async () => {
 		const { postHog, syncGate } = createGates();
 		postHog.getFeatureFlags.mockResolvedValue({ [SKILL_SYNC_FLAG]: true });
@@ -126,6 +157,52 @@ describe('skills gates', () => {
 			expect(postHog.getFeatureFlags).toHaveBeenCalledWith(user);
 		},
 	);
+
+	it.each([
+		{ flag: true, switchOn: true, expected: true },
+		{ flag: true, switchOn: false, expected: false },
+		{ flag: false, switchOn: true, expected: false },
+		{ flag: false, switchOn: false, expected: false },
+	])(
+		'turns Skill Sync on only with the flag and the switch on (flag: $flag, switch: $switchOn)',
+		async ({ flag, switchOn, expected }) => {
+			const { proxy, postHog, syncGate, skillSyncSettings } = createGates();
+			postHog.getFeatureFlags.mockResolvedValue({ [SKILL_SYNC_FLAG]: flag });
+			skillSyncSettings.isEnabled.mockReturnValue(switchOn);
+			proxy.register(mock<SkillUsage>());
+
+			expect(await syncGate.isEnabled(user)).toBe(expected);
+		},
+	);
+
+	// n8n Assistant reads the flags of a turn once and asks the gate with them.
+	it.each([
+		{ name: 'everything on', flag: true, skillsOn: true, switchOn: true, expected: true },
+		{ name: 'skills off', flag: true, skillsOn: false, switchOn: true, expected: false },
+		{ name: 'the switch off', flag: true, skillsOn: true, switchOn: false, expected: false },
+		{ name: 'the flag off', flag: false, skillsOn: true, switchOn: true, expected: false },
+		{ name: 'a flag variant', flag: 'test', skillsOn: true, switchOn: true, expected: false },
+		{ name: 'no flag', flag: undefined, skillsOn: true, switchOn: true, expected: false },
+	])(
+		'answers $expected for flags that the caller already has, with $name',
+		({ flag, skillsOn, switchOn, expected }) => {
+			const { proxy, postHog, syncGate, skillSyncSettings } = createGates();
+			skillSyncSettings.isEnabled.mockReturnValue(switchOn);
+			if (skillsOn) proxy.register(mock<SkillUsage>());
+
+			expect(syncGate.isEnabledForFlags({ [SKILL_SYNC_FLAG]: flag })).toBe(expected);
+			expect(postHog.getFeatureFlags).not.toHaveBeenCalled();
+		},
+	);
+
+	it('answers 404 while the Skill Sync switch is off', async () => {
+		const { proxy, postHog, syncGate, skillSyncSettings } = createGates();
+		postHog.getFeatureFlags.mockResolvedValue({ [SKILL_SYNC_FLAG]: true });
+		skillSyncSettings.isEnabled.mockReturnValue(false);
+		proxy.register(mock<SkillUsage>());
+
+		await expect(syncGate.assertEnabled(user)).rejects.toThrow(NotFoundError);
+	});
 
 	it('answers 404 for a user without the Skill Sync flag', async () => {
 		const { proxy, postHog, syncGate } = createGates();

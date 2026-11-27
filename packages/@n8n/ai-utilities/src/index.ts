@@ -133,6 +133,7 @@ export type { JSONArray, JSONObject, JSONValue } from './types/json';
 
 // Chat model classes
 export { LangchainChatModelAdapter } from './adapters/langchain-chat-model';
+export { AiSdkLanguageModelAdapter } from './adapters/ai-sdk-language-model';
 export { BaseChatModel } from './chat-model/base';
 
 // Memory base classes
@@ -144,4 +145,10 @@ export { WindowedChatMemory, type WindowedChatMemoryConfig } from './memory/wind
 
 // Suppliers
 export { supplyMemory, type SupplyMemoryOptions } from './suppliers/supplyMemory';
-export { supplyModel, type SupplyModelOptions, type OpenAiModel } from './suppliers/supplyModel';
+export {
+	supplyModel,
+	getSuppliedModelOptions,
+	type SuppliedModel,
+	type SupplyModelOptions,
+	type OpenAiModel,
+} from './suppliers/supplyModel';
