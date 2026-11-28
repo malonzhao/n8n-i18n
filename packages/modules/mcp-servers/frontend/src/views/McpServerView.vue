@@ -29,7 +29,9 @@ import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
 import McpServerAssistantPanel from '../components/McpServerAssistantPanel.vue';
+import McpServerConnectionsTab from '../components/McpServerConnectionsTab.vue';
 import McpServerContentsTab from '../components/McpServerContentsTab.vue';
+import { useMcpServerConnections } from '../composables/useMcpServerConnections';
 import McpServerDescriptionEdit from '../components/McpServerDescriptionEdit.vue';
 import RenameMcpServerDialog from '../components/RenameMcpServerDialog.vue';
 import { useMcpServerUrl } from '../composables/useMcpServerUrl';
@@ -46,13 +48,14 @@ const route = useRoute();
 const router = useRouter();
 const rootStore = useRootStore();
 const toast = useToast();
-const { serverUrl, copyServerUrl } = useMcpServerUrl();
+const { serverUrl, copyServerUrl, copyShareLink } = useMcpServerUrl();
 const latestFetch = useLatestFetch();
 const assistant = capabilityRegistry.use(capabilities.createMcpServerAssistantHandoff)();
 
 const projectId = computed(() => String(route.params.projectId));
 const serverId = computed(() => String(route.params.serverId));
 const permissions = computed(() => getMcpServerPermissions(projectId.value));
+const connections = useMcpServerConnections(projectId, serverId);
 /** The Assistant on this page changes the server, so a project viewer does not get it. */
 const canUseAssistant = computed(() => assistant.available.value && permissions.value.canUpdate);
 
@@ -75,7 +78,12 @@ const tabs = computed(() => [
 	{ value: MCP_SERVER_VIEW, label: i18n.baseText('mcpServers.server.tabs.contents') },
 	{
 		value: MCP_SERVER_CONNECTIONS_VIEW,
-		label: i18n.baseText('mcpServers.server.tabs.connections'),
+		label:
+			connections.rowCount.value === null
+				? i18n.baseText('mcpServers.server.tabs.connections')
+				: i18n.baseText('mcpServers.server.tabs.connectionsWithCount', {
+						interpolate: { count: String(connections.rowCount.value) },
+					}),
 	},
 ]);
 
@@ -97,7 +105,7 @@ const breadcrumbs = computed<PathItem[]>(() => [
 	...(server.value ? [{ id: MCP_SERVER_VIEW, label: server.value.name }] : []),
 ]);
 
-type MenuAction = 'rename' | 'copy-url' | 'delete';
+type MenuAction = 'rename' | 'copy-share-link' | 'copy-url' | 'delete';
 
 const menuActions = computed(() => {
 	const actions: Array<{
@@ -109,7 +117,10 @@ const menuActions = computed(() => {
 	if (permissions.value.canUpdate) {
 		actions.push({ value: 'rename', label: i18n.baseText('mcpServers.actions.rename') });
 	}
-	actions.push({ value: 'copy-url', label: i18n.baseText('mcpServers.actions.copyUrl') });
+	actions.push(
+		{ value: 'copy-share-link', label: i18n.baseText('mcpServers.actions.copyShareLink') },
+		{ value: 'copy-url', label: i18n.baseText('mcpServers.actions.copyUrl') },
+	);
 	if (permissions.value.canDelete) {
 		actions.push({
 			value: 'delete',
@@ -155,7 +166,16 @@ async function load({ silent = false } = {}) {
 	loading.value = false;
 }
 
-watch([projectId, serverId], async () => await load(), { immediate: true });
+watch(
+	[projectId, serverId],
+	async () => {
+		connections.data.value = null;
+		await load();
+		// A server that did not load has no connections, and their load would show a second error.
+		if (server.value) await connections.load();
+	},
+	{ immediate: true },
+);
 
 // A panel binds one server, so a route to another server closes it.
 watch(serverId, () => {
@@ -205,14 +225,18 @@ async function onAssistantChanged() {
 		return;
 	}
 	contentsRefreshKey.value++;
+	await connections.load();
 }
 
 async function onSelectTab(tab: string) {
+	// People connect at any time, so the tab shows the list as it is now.
+	if (tab === MCP_SERVER_CONNECTIONS_VIEW) void connections.load();
 	await router.push({ name: tab, params: route.params });
 }
 
 function onMenu(action: MenuAction) {
 	if (action === 'rename') renameOpen.value = true;
+	if (action === 'copy-share-link' && server.value) void copyShareLink(server.value);
 	if (action === 'copy-url' && server.value) void copyServerUrl(server.value);
 	if (action === 'delete') deleteOpen.value = true;
 }
@@ -404,7 +428,15 @@ async function onBreadcrumbSelected(item: PathItem) {
 					:refresh-key="contentsRefreshKey"
 					@build-with-assistant="onBuildWithAssistant"
 				/>
-				<div v-else :class="$style.panel" data-test-id="mcp-server-connections" />
+				<McpServerConnectionsTab
+					v-else
+					:class="$style.panel"
+					:server="server"
+					:connections="connections.data.value"
+					:loading="connections.loading.value"
+					:load-failed="connections.loadFailed.value"
+					@changed="connections.load"
+				/>
 
 				<RenameMcpServerDialog
 					v-model:open="renameOpen"

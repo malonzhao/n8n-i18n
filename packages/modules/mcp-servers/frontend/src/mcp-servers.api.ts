@@ -1,7 +1,11 @@
 import type {
 	CreateMcpServerDto,
+	McpServerBlockResponse,
+	McpServerConnectionsResponse,
 	McpServerDetailResponse,
 	McpServerResponse,
+	McpServerShare,
+	McpServerSharePublic,
 	McpServerSlugAvailability,
 	McpServerToolCandidate,
 	McpServerToolDraftField,
@@ -135,5 +139,73 @@ export async function draftTool(
 		'POST',
 		`${serverPath(projectId, serverId)}/tools/${toolId}/draft`,
 		field ? { field } : {},
+	);
+}
+
+/** The share page for a signed-in person. The tools come only when the person can connect. */
+export async function getMcpServerShare(
+	context: IRestApiContext,
+	slug: string,
+): Promise<McpServerShare> {
+	return await makeRestApiRequest(context, 'GET', `/mcp-servers/share/${encodeURIComponent(slug)}`);
+}
+
+/** The share page with no sign-in. It never has the description or the tools. */
+export async function getMcpServerPublicShare(
+	context: IRestApiContext,
+	slug: string,
+): Promise<McpServerSharePublic> {
+	return await makeRestApiRequest(
+		context,
+		'GET',
+		`/mcp-servers/share/${encodeURIComponent(slug)}/public`,
+	);
+}
+
+/** Each person and client that connected, and the blocked people. */
+export async function listMcpServerConnections(
+	context: IRestApiContext,
+	projectId: string,
+	serverId: string,
+): Promise<McpServerConnectionsResponse> {
+	return await makeRestApiRequest(context, 'GET', `${serverPath(projectId, serverId)}/connections`);
+}
+
+/** All clients of the person lose access at once. */
+export async function blockMcpServerUser(
+	context: IRestApiContext,
+	projectId: string,
+	serverId: string,
+	userId: string,
+): Promise<McpServerBlockResponse> {
+	return await makeRestApiRequest(context, 'POST', `${serverPath(projectId, serverId)}/blocks`, {
+		userId,
+	});
+}
+
+export async function restoreMcpServerUser(
+	context: IRestApiContext,
+	projectId: string,
+	serverId: string,
+	userId: string,
+): Promise<void> {
+	await makeRestApiRequest(
+		context,
+		'DELETE',
+		`${serverPath(projectId, serverId)}/blocks/${userId}`,
+	);
+}
+
+/** Only for a blocked person: deletes their connections and ends the block. */
+export async function removeMcpServerUser(
+	context: IRestApiContext,
+	projectId: string,
+	serverId: string,
+	userId: string,
+): Promise<void> {
+	await makeRestApiRequest(
+		context,
+		'DELETE',
+		`${serverPath(projectId, serverId)}/connections/${userId}`,
 	);
 }

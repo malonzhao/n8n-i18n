@@ -10,14 +10,15 @@ import type { User } from '@n8n/db';
 import { Service } from '@n8n/di';
 import { BadRequestError, NotFoundError, UnexpectedError } from '@n8n/errors';
 
-import { McpServerProtectedResource } from '../runtime/mcp-server-protected-resource';
-import { OAuthGrantPort } from '../tools/oauth-grant-port';
 import type { McpServer } from '../database/entities/mcp-server.entity';
-import type { McpServerActor } from '../mcp-server-events';
 import {
 	McpServerRepository,
 	type McpServerProject,
 } from '../database/repositories/mcp-server.repository';
+import { McpServerNotFoundError } from '../errors/mcp-server-not-found.error';
+import { RefreshTokenPort } from '../ports/refresh-token.port';
+import type { McpServerActor } from '../utils/mcp-server-events';
+import { McpServerProtectedResource } from './mcp-server-protected-resource.service';
 
 function toResponse(server: McpServer, project: McpServerProject): McpServerResponse {
 	return {
@@ -43,7 +44,7 @@ export class McpServersService {
 		private readonly projectScopeService: ProjectScopeService,
 		private readonly events: EventService,
 		private readonly resources: McpServerProtectedResource,
-		private readonly grants: OAuthGrantPort,
+		private readonly refreshTokens: RefreshTokenPort,
 	) {}
 
 	async create(
@@ -63,7 +64,7 @@ export class McpServersService {
 		});
 		// A slug is free again after its project is deleted. Grants for the old server must not
 		// reach the new one. Old access tokens end within their short lifetime.
-		await this.grants.revokeForResource(this.resources.serverUrl(server));
+		await this.refreshTokens.deleteForResource(this.resources.serverUrl(server));
 		this.events.emit('mcp-server-created', { ...actor, serverId: server.id, projectId });
 		return await this.withProject(server);
 	}
@@ -96,15 +97,18 @@ export class McpServersService {
 		const server = this.isServerId(serverId)
 			? await this.servers.update(projectId, serverId, dto)
 			: null;
-		if (!server) throw new NotFoundError('MCP server not found');
+		if (!server) throw new McpServerNotFoundError();
 		return await this.withProject(server);
 	}
 
+	/** Also deletes the refresh tokens of the server at once, so no client keeps a way back in. */
 	async delete(projectId: string, serverId: string, actor: McpServerActor): Promise<void> {
-		const deleted = this.isServerId(serverId)
-			? await this.servers.softDelete(projectId, serverId)
-			: false;
-		if (!deleted) throw new NotFoundError('MCP server not found');
+		const server = await this.find(projectId, serverId);
+		// The tokens go first. If their delete fails, the server stays and a retry works.
+		await this.refreshTokens.deleteForResource(this.resources.serverUrl(server));
+		if (!(await this.servers.softDelete(projectId, server.id))) {
+			throw new McpServerNotFoundError();
+		}
 		this.events.emit('mcp-server-deleted', { ...actor, serverId, projectId });
 	}
 
@@ -120,7 +124,7 @@ export class McpServersService {
 		const server = this.isServerId(serverId)
 			? await this.servers.findInProject(projectId, serverId)
 			: null;
-		if (!server) throw new NotFoundError('MCP server not found');
+		if (!server) throw new McpServerNotFoundError();
 		return server;
 	}
 

@@ -7087,6 +7087,38 @@ describe('TelemetryEventRelay', () => {
 			);
 		});
 
+		it.each([
+			[
+				'a signed-in person',
+				{ serverId: 'server-1', userId: 'user-1', canConnect: true, result: 'found' },
+				{
+					server_id: 'server-1',
+					user_id: 'user-1',
+					signed_in: true,
+					can_connect: true,
+					result: 'found',
+				},
+			],
+			[
+				'a person who is not signed in, on a link that finds no server',
+				{ canConnect: false, result: 'not_found' },
+				{
+					server_id: undefined,
+					user_id: undefined,
+					signed_in: false,
+					can_connect: false,
+					result: 'not_found',
+				},
+			],
+		] as const)('tracks a share page view of %s', (_case, payload, properties) => {
+			mcpEventService.emit('mcp-server-share-viewed', payload);
+
+			expect(telemetry.track).toHaveBeenCalledExactlyOnceWith(
+				TELEMETRY_EVENT.CUSTOM_MCP_SERVERS.USER_VIEWED_MCP_SERVER_SHARE_PAGE,
+				properties,
+			);
+		});
+
 		it('tracks a tool call with the client, the status, and the duration', () => {
 			mcpEventService.emit('mcp-server-tool-called', {
 				serverId: 'server-1',
@@ -7106,6 +7138,60 @@ describe('TelemetryEventRelay', () => {
 					tool_kind: 'workflow',
 					status: 'error',
 					duration_ms: 1200,
+				},
+			);
+		});
+
+		it('tracks a new connection with the client name', () => {
+			mcpEventService.emit('mcp-server-connected', {
+				serverId: 'server-1',
+				userId: 'user-1',
+				clientName: 'Claude Code',
+			});
+
+			expect(telemetry.track).toHaveBeenCalledExactlyOnceWith(
+				TELEMETRY_EVENT.CUSTOM_MCP_SERVERS.USER_CONNECTED_TO_CUSTOM_MCP_SERVER,
+				{ server_id: 'server-1', user_id: 'user-1', client_name: 'Claude Code' },
+			);
+		});
+
+		it('tracks a block with the blocked person and the source', () => {
+			mcpEventService.emit('mcp-server-person-blocked', {
+				serverId: 'server-1',
+				userId: 'user-1',
+				blockedUserId: 'user-2',
+				source: 'ui',
+			});
+
+			expect(telemetry.track).toHaveBeenCalledExactlyOnceWith(
+				TELEMETRY_EVENT.CUSTOM_MCP_SERVERS.USER_BLOCKED_PERSON_FROM_CUSTOM_MCP_SERVER,
+				{
+					server_id: 'server-1',
+					user_id: 'user-1',
+					blocked_user_id: 'user-2',
+					source: 'ui',
+					thread_id: undefined,
+				},
+			);
+		});
+
+		it('tracks a restored access with the person and the source', () => {
+			mcpEventService.emit('mcp-server-access-restored', {
+				serverId: 'server-1',
+				userId: 'user-1',
+				restoredUserId: 'user-2',
+				source: 'assistant',
+				threadId: 'thread-1',
+			});
+
+			expect(telemetry.track).toHaveBeenCalledExactlyOnceWith(
+				TELEMETRY_EVENT.CUSTOM_MCP_SERVERS.USER_RESTORED_ACCESS_TO_CUSTOM_MCP_SERVER,
+				{
+					server_id: 'server-1',
+					user_id: 'user-1',
+					restored_user_id: 'user-2',
+					source: 'assistant',
+					thread_id: 'thread-1',
 				},
 			);
 		});
